@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlirtDesk API</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111412; color: #f7f7f2; font: 15px/1.55 system-ui, sans-serif; padding: 24px; }
+      .card { width: 100%; max-width: 620px; }
+      .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; margin-bottom: 18px; }
+      .mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; background: #d7ff52; color: #111; font-weight: 900; }
+      h1 { font-size: 18px; margin: 0 0 8px; }
+      p { color: #a7ada9; margin: 0 0 16px; }
+      textarea { width: 100%; min-height: 150px; padding: 11px; border-radius: 6px; border: 1px solid #373d39; background: #1b201d; color: #f7f7f2; font: inherit; resize: vertical; }
+      button { margin-top: 10px; padding: 10px 16px; border: 0; border-radius: 6px; background: #d7ff52; color: #111; font-weight: 700; cursor: pointer; }
+      button[disabled] { opacity: 0.55; cursor: default; }
+      .out { margin-top: 16px; padding: 12px; border-left: 3px solid #d7ff52; background: #252a27; white-space: pre-wrap; }
+      .muted { color: #a7ada9; font-size: 13px; margin-top: 6px; }
+      .err { border-left-color: #ff8277; color: #ff8277; }
+      code { background: #1b201d; padding: 1px 5px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand"><span class="mark">F</span>FlirtDesk</div>
+      <h1>Reply drafting endpoint</h1>
+      <p>
+        Live at <code>POST /api/replies</code>. Paste a conversation below to test it, then point
+        the Orbita extension at this deployment's URL.
+      </p>
+      <textarea id="conv" placeholder="Him: hey, what are you up to tonight?&#10;Me: just got home from work&#10;Him: nice, where do you work?"></textarea>
+      <button id="go">Draft a reply</button>
+      <div id="out"></div>
+    </main>
+    <script>
+      const go = document.getElementById("go");
+      const conv = document.getElementById("conv");
+      const out = document.getElementById("out");
+
+      go.addEventListener("click", async () => {
+        out.innerHTML = "";
+        go.disabled = true;
+        go.textContent = "Drafting…";
+        try {
+          const res = await fetch("/api/replies", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ conversation: conv.value }),
+          });
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || "Request failed (" + res.status + ")");
+          const warn = json.warnings && json.warnings.length
+            ? "Rule check FAILED: " + json.warnings.join("; ")
+            : "Rule check passed";
+          out.innerHTML =
+            '<div class="out"></div><div class="muted"></div>';
+          out.querySelector(".out").textContent = json.drafts[0];
+          out.querySelector(".muted").textContent = json.characters + " characters · " + warn;
+        } catch (error) {
+          out.innerHTML = '<div class="out err"></div>';
+          out.querySelector(".out").textContent = error.message;
+        } finally {
+          go.disabled = false;
+          go.textContent = "Draft a reply";
+        }
+      });
+    </script>
+  </body>
+</html>
