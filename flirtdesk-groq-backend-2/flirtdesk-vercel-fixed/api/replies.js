@@ -1,4 +1,4 @@
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   // CORS Headers
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -11,7 +11,7 @@ module.exports = async function handler(req, res) {
     "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
   );
 
-  // Handle preflight CORS request
+  // Handle preflight request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -31,9 +31,7 @@ module.exports = async function handler(req, res) {
   try {
     const { messages, tone, goal, customizedPrompt } = req.body || {};
 
-    let systemInstructionText = "You are a helpful flirting and messaging assistant.";
-    
-    // Build user prompt context
+    // Build prompt string
     let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
     if (tone) promptText += `Tone: ${tone}\n`;
     if (goal) promptText += `Goal: ${goal}\n`;
@@ -41,7 +39,7 @@ module.exports = async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Call Google Gemini API
+    // Call Google Gemini API directly
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
@@ -51,7 +49,7 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           system_instruction: {
-            parts: [{ text: systemInstructionText }]
+            parts: [{ text: "You are a helpful flirting and messaging assistant." }]
           },
           contents: [
             {
@@ -68,15 +66,16 @@ module.exports = async function handler(req, res) {
     if (!response.ok) {
       console.error("Gemini API Error:", data);
       return res.status(response.status).json({
-        error: data.error?.message || "Failed to generate replies from Gemini API"
+        error: data.error?.message || "Failed to generate reply from Gemini API"
       });
     }
 
-    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
+    const replyText =
+      data.candidates?.[0]?.content?.parts?.[0]?.text || "No reply generated.";
 
     return res.status(200).json({ reply: replyText });
   } catch (error) {
     console.error("Server Error:", error);
     return res.status(500).json({ error: error.message || "Internal Server Error" });
   }
-};
+}
