@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // CORS Headers
+  // Set CORS headers
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
   );
 
-  // Handle preflight request
+  // Handle preflight CORS request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
   try {
     const { messages, tone, goal, customizedPrompt } = req.body || {};
 
-    // Build prompt string
+    // Construct prompt structure
     let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
     if (tone) promptText += `Tone: ${tone}\n`;
     if (goal) promptText += `Goal: ${goal}\n`;
@@ -39,9 +39,9 @@ export default async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Call Google Gemini API directly
+    // Call Google Gemini API using stable flash endpoint
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: {
