@@ -37,15 +37,15 @@ export default async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Call Cerebras OpenAI-compatible Chat Completions API
+    // Call Cerebras OpenAI-compatible API
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        "Authorization": `Bearer ${apiKey.trim()}`
       },
       body: JSON.stringify({
-        model: "llama3.1-8b",
+        model: "llama-3.3-70b",
         messages: [
           {
             role: "system",
