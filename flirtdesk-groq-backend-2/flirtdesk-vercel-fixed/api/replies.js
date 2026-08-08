@@ -77,24 +77,59 @@ async function listCerebrasModels(key) {
   return models;
 }
 
+function normaliseWho(who) {
+  const w = String(who || "").toLowerCase();
+  return w === "me" || w === "self" || w === "operator" ? "me" : "him";
+}
+
 function buildUserPrompt({ turns, conversation }) {
   let text = "";
+  let lastHim = "";
+
   if (Array.isArray(turns) && turns.length) {
-    text = turns
-      .map((t) => `${t.who === "me" ? "Me" : "Him"}: ${String(t.text || "").trim()}`)
-      .join("\n");
+    const norm = turns.map((t) => ({
+      who: normaliseWho(t.who),
+      text: String(t.text || "").trim(),
+    }));
+    text = norm.map((t) => `${t.who === "me" ? "Me" : "Him"}: ${t.text}`).join("\n");
+    for (let i = norm.length - 1; i >= 0; i--) {
+      if (norm[i].who === "him" && norm[i].text) {
+        lastHim = norm[i].text;
+        break;
+      }
+    }
   } else {
     text = String(conversation || "");
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/^(him|them|he)\s*:/i.test(lines[i])) {
+        lastHim = lines[i].replace(/^[^:]*:\s*/, "");
+        break;
+      }
+    }
+    if (!lastHim && lines.length) lastHim = lines[lines.length - 1].replace(/^[^:]*:\s*/, "");
   }
+
   if (text.length > MAX_CHARS) text = text.slice(-MAX_CHARS);
-  return `Conversation so far:\n${text}\n\nWrite only the next message from me (75-150 characters, exactly one question).`;
+
+  return [
+    "Conversation so far (Him = the customer, Me = you, the female player):",
+    text,
+    "",
+    `THE MESSAGE YOU MUST REPLY TO (his most recent message): "${lastHim}"`,
+    "",
+    "Reply directly and specifically to that last message. Stay on its exact topic,",
+    "answer anything he asked in it, and reference a concrete detail from it.",
+    "Do not start a new subject and do not reply to older messages.",
+    "Write only the next message from me (75-150 characters, exactly one question).",
+  ].join("\n");
 }
 
 async function callOpenAICompatible({ url, key, model, messages }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, messages, temperature: 0.7, max_completion_tokens: 120 }),
+    body: JSON.stringify({ model, messages, temperature: 0.5, max_completion_tokens: 120 }),
   });
   const raw = await res.text();
   let data = {};
@@ -203,7 +238,7 @@ export default async function handler(req, res) {
         { role: "assistant", content: text },
         {
           role: "user",
-          content: `That draft broke these rules: ${check.issues.join("; ")}. Rewrite it, fixing every issue. Output only the message.`,
+          content: `That draft broke these rules: ${check.issues.join("; ")}. Rewrite it keeping EXACTLY the same topic and the same reply to his last message - only reword the flagged parts. Do not change the subject. Output only the message.`,
         },
       ]);
       text = retry.text;
