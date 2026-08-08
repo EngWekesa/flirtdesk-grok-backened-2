@@ -1,109 +1,145 @@
+import { OPERATOR_SYSTEM_PROMPT, checkDraft } from "./_rules.js";
+
+// Cerebras models to try in order. First one that answers wins.
+const CEREBRAS_MODELS = (process.env.CEREBRAS_MODEL || "llama3.1-8b,llama-3.3-70b,gpt-oss-120b")
+  .split(",")
+  .map((m) => m.trim())
+  .filter(Boolean);
+
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const MAX_CHARS = 900;
+
+function buildUserPrompt({ turns, conversation }) {
+  let text = "";
+  if (Array.isArray(turns) && turns.length) {
+    text = turns
+      .map((t) => `${t.who === "me" ? "Me" : "Him"}: ${String(t.text || "").trim()}`)
+      .join("\n");
+  } else {
+    text = String(conversation || "");
+  }
+  if (text.length > MAX_CHARS) text = text.slice(-MAX_CHARS);
+  return `Conversation so far:\n${text}\n\nWrite only the next message from me (75-150 characters, exactly one question).`;
+}
+
+async function callOpenAICompatible({ url, key, model, messages }) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model, messages, temperature: 0.7, max_completion_tokens: 120 }),
+  });
+  const raw = await res.text();
+  let data = {};
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    /* non-JSON error body */
+  }
+  if (!res.ok) {
+    const detail = data?.error?.message || data?.message || raw.slice(0, 300);
+    const err = new Error(`${model}: HTTP ${res.status} ${detail}`);
+    err.status = res.status;
+    throw err;
+  }
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content || !content.trim()) throw new Error(`${model}: empty completion`);
+  return content.trim().replace(/^["'\s]+|["'\s]+$/g, "");
+}
+
+async function generate(messages) {
+  const attempts = [];
+  const cerebrasKey = (process.env.CEREBRAS_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+
+  if (cerebrasKey) {
+    for (const model of CEREBRAS_MODELS) {
+      try {
+        return {
+          text: await callOpenAICompatible({
+            url: "https://api.cerebras.ai/v1/chat/completions",
+            key: cerebrasKey,
+            model,
+            messages,
+          }),
+          provider: `cerebras/${model}`,
+        };
+      } catch (e) {
+        attempts.push(`cerebras ${e.message}`);
+      }
+    }
+  } else {
+    attempts.push("cerebras: CEREBRAS_API_KEY not set");
+  }
+
+  if (groqKey) {
+    try {
+      return {
+        text: await callOpenAICompatible({
+          url: "https://api.groq.com/openai/v1/chat/completions",
+          key: groqKey,
+          model: GROQ_MODEL,
+          messages,
+        }),
+        provider: `groq/${GROQ_MODEL}`,
+      };
+    } catch (e) {
+      attempts.push(`groq ${e.message}`);
+    }
+  }
+
+  const err = new Error(`All providers failed -> ${attempts.join(" | ")}`);
+  err.attempts = attempts;
+  throw err;
+}
+
 export default async function handler(req, res) {
-  // CORS Headers
-  res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,OPTIONS,PATCH,DELETE,POST,PUT"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
-  );
-
-  // Handle preflight OPTIONS request
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const apiKey = process.env.CEREBRAS_API_KEY;
-
-  if (!apiKey) {
-    return res.status(500).json({
-      error: "CEREBRAS_API_KEY environment variable is missing on Vercel"
-    });
-  }
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const cleanApiKey = apiKey.trim();
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+    const userPrompt = buildUserPrompt(body);
 
-    // Default to active Cerebras production model
-    let targetModel = "gpt-oss-120b";
+    const messages = [
+      { role: "system", content: OPERATOR_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt },
+    ];
 
-    // Query active models list from Cerebras to ensure valid model ID
-    try {
-      const modelsResponse = await fetch("https://api.cerebras.ai/v1/models", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${cleanApiKey}`
-        }
-      });
+    let { text, provider } = await generate(messages);
+    let check = checkDraft(text);
+    let regenerated = false;
 
-      if (modelsResponse.ok) {
-        const modelsData = await modelsResponse.json();
-        if (modelsData.data && modelsData.data.length > 0) {
-          // Check if gpt-oss-120b exists, otherwise use the first active model
-          const modelExists = modelsData.data.some(m => m.id === targetModel);
-          if (!modelExists) {
-            targetModel = modelsData.data[0].id;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("Could not dynamically fetch models list:", e.message);
+    // Only retry when a hard rule broke, not for a few characters of length drift.
+    const hardFail = check.issues.some((i) => !i.startsWith("too short") && !i.startsWith("too long"));
+    if (hardFail) {
+      regenerated = true;
+      const retry = await generate([
+        ...messages,
+        { role: "assistant", content: text },
+        {
+          role: "user",
+          content: `That draft broke these rules: ${check.issues.join("; ")}. Rewrite it, fixing every issue. Output only the message.`,
+        },
+      ]);
+      text = retry.text;
+      provider = retry.provider;
+      check = checkDraft(text);
     }
 
-    const { messages, tone, goal, customizedPrompt } = req.body || {};
-
-    let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
-    if (tone) promptText += `Tone: ${tone}\n`;
-    if (goal) promptText += `Goal: ${goal}\n`;
-    if (customizedPrompt) promptText += `Custom instructions: ${customizedPrompt}\n`;
-
-    promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
-
-    // Call Cerebras Chat Completions
-    const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cleanApiKey}`
-      },
-      body: JSON.stringify({
-        model: targetModel,
-        messages: [
-          {
-            role: "system",
-            content: "You are a helpful flirting and messaging assistant."
-          },
-          {
-            role: "user",
-            content: promptText
-          }
-        ],
-        temperature: 0.7
-      })
+    return res.status(200).json({
+      drafts: [text],
+      warnings: check.issues,
+      compliant: check.ok,
+      characters: text.length,
+      regenerated,
+      provider,
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error("Cerebras API Error:", data);
-      return res.status(response.status).json({
-        error: data.error?.message || "Failed to generate reply from Cerebras API"
-      });
-    }
-
-    const replyText =
-      data.choices?.[0]?.message?.content || "No reply generated.";
-
-    return res.status(200).json({ reply: replyText });
   } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: error.message || "Internal Server Error" });
+    console.error("FlirtDesk error:", error);
+    return res.status(502).json({ error: error.message || "Internal Server Error" });
   }
 }
