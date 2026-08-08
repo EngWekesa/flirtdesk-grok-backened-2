@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // CORS Headers
+  // Set CORS headers
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -11,6 +11,7 @@ export default async function handler(req, res) {
     "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
   );
 
+  // Handle preflight OPTIONS request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -37,7 +38,7 @@ export default async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Call Cerebras OpenAI-compatible API
+    // Cerebras Chat Completions Call
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -45,7 +46,7 @@ export default async function handler(req, res) {
         "Authorization": `Bearer ${apiKey.trim()}`
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b",
+        model: "llama3.1-8b",
         messages: [
           {
             role: "system",
