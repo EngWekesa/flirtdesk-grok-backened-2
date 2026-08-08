@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // Set CORS headers
+  // CORS Headers
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
   );
 
-  // Handle preflight OPTIONS request
+  // Handle OPTIONS preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -29,29 +29,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    const cleanApiKey = apiKey.trim();
-
-    // Dynamically fetch currently available active models from Cerebras
-    let targetModel = "llama3.1-8b";
-    try {
-      const modelsResponse = await fetch("https://api.cerebras.ai/v1/models", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${cleanApiKey}`
-        }
-      });
-
-      if (modelsResponse.ok) {
-        const modelsData = await modelsResponse.json();
-        if (modelsData.data && modelsData.data.length > 0) {
-          // Use the first active model available on your account
-          targetModel = modelsData.data[0].id;
-        }
-      }
-    } catch (e) {
-      console.warn("Could not dynamically fetch models, using default:", e.message);
-    }
-
     const { messages, tone, goal, customizedPrompt } = req.body || {};
 
     let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
@@ -61,15 +38,15 @@ export default async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Call Cerebras Chat Completions
+    // Call Cerebras Chat Completions API with standard llama3.1-8b
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${cleanApiKey}`
+        "Authorization": `Bearer ${apiKey.trim()}`
       },
       body: JSON.stringify({
-        model: targetModel,
+        model: "llama3.1-8b",
         messages: [
           {
             role: "system",
@@ -87,9 +64,15 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("Cerebras API Error:", data);
+      console.error("Cerebras Detailed Error:", JSON.stringify(data));
+      const errorMessage =
+        data.error?.message ||
+        data.detail ||
+        (typeof data.error === 'string' ? data.error : null) ||
+        JSON.stringify(data);
+
       return res.status(response.status).json({
-        error: data.error?.message || "Failed to generate reply from Cerebras API"
+        error: `Cerebras Error (${response.status}): ${errorMessage}`
       });
     }
 
