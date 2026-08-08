@@ -1,13 +1,81 @@
 import { OPERATOR_SYSTEM_PROMPT, checkDraft } from "./_rules.js";
 
-// Cerebras models to try in order. First one that answers wins.
-const CEREBRAS_MODELS = (process.env.CEREBRAS_MODEL || "llama3.1-8b,llama-3.3-70b,gpt-oss-120b")
+const CEREBRAS_BASE = "https://api.cerebras.ai/v1";
+const MAX_CHARS = 900;
+
+// Optional hard override, e.g. CEREBRAS_MODEL="llama3.1-8b,qwen-3-32b".
+// Leave it UNSET in Vercel to let auto-discovery do its job.
+const CEREBRAS_OVERRIDE = (process.env.CEREBRAS_MODEL || "")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
-const MAX_CHARS = 900;
+// Preference order for auto-discovered models: cheap + fast first, so the free
+// daily quota stretches as far as possible. Anything not listed still gets used,
+// just after these. Matching is by substring, case-insensitive.
+const PREFERENCE = [
+  "llama3.1-8b",
+  "llama-3.1-8b",
+  "llama-4-scout",
+  "qwen-3-32b",
+  "llama-3.3-70b",
+  "llama-4-maverick",
+  "qwen-3-235b",
+  "gpt-oss",
+];
+
+function rank(id) {
+  const lower = id.toLowerCase();
+  const i = PREFERENCE.findIndex((p) => lower.includes(p));
+  return i === -1 ? PREFERENCE.length : i;
+}
+
+// ---- model discovery + memory of what actually works -----------------------
+// Module scope survives between invocations on a warm Vercel lambda, so we pay
+// for discovery roughly once per cold start instead of once per reply.
+let cerebrasCache = { models: null, at: 0 };
+const DISCOVERY_TTL_MS = 30 * 60 * 1000;
+const blocked = new Map(); // model -> timestamp it was blocked (402/404)
+const BLOCK_TTL_MS = 15 * 60 * 1000;
+
+function isBlocked(model) {
+  const at = blocked.get(model);
+  if (!at) return false;
+  if (Date.now() - at > BLOCK_TTL_MS) {
+    blocked.delete(model);
+    return false;
+  }
+  return true;
+}
+
+async function listCerebrasModels(key) {
+  if (CEREBRAS_OVERRIDE.length) return CEREBRAS_OVERRIDE;
+  if (cerebrasCache.models && Date.now() - cerebrasCache.at < DISCOVERY_TTL_MS) {
+    return cerebrasCache.models;
+  }
+  const res = await fetch(`${CEREBRAS_BASE}/models`, {
+    headers: { authorization: `Bearer ${key}` },
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    const err = new Error(`model discovery: HTTP ${res.status} ${raw.slice(0, 200)}`);
+    err.status = res.status;
+    throw err;
+  }
+  let data = {};
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("model discovery: non-JSON response");
+  }
+  const models = (data?.data || [])
+    .map((m) => m?.id)
+    .filter(Boolean)
+    .sort((a, b) => rank(a) - rank(b));
+  if (!models.length) throw new Error("model discovery: account exposes no models");
+  cerebrasCache = { models, at: Date.now() };
+  return models;
+}
 
 function buildUserPrompt({ turns, conversation }) {
   let text = "";
@@ -49,14 +117,21 @@ async function callOpenAICompatible({ url, key, model, messages }) {
 async function generate(messages) {
   const attempts = [];
   const cerebrasKey = (process.env.CEREBRAS_API_KEY || "").trim();
-  const groqKey = (process.env.GROQ_API_KEY || "").trim();
 
+  // Cerebras is the only provider.
   if (cerebrasKey) {
-    for (const model of CEREBRAS_MODELS) {
+    let models = [];
+    try {
+      models = await listCerebrasModels(cerebrasKey);
+    } catch (e) {
+      attempts.push(`cerebras ${e.message}`);
+    }
+    for (const model of models) {
+      if (isBlocked(model)) continue;
       try {
         return {
           text: await callOpenAICompatible({
-            url: "https://api.cerebras.ai/v1/chat/completions",
+            url: `${CEREBRAS_BASE}/chat/completions`,
             key: cerebrasKey,
             model,
             messages,
@@ -65,38 +140,43 @@ async function generate(messages) {
         };
       } catch (e) {
         attempts.push(`cerebras ${e.message}`);
+        // 404 = no access, 402 = billing, 403 = not entitled: stop retrying this
+        // model for a while so later replies skip straight to a working one.
+        if ([402, 403, 404].includes(e.status)) blocked.set(model, Date.now());
       }
     }
   } else {
     attempts.push("cerebras: CEREBRAS_API_KEY not set");
   }
 
-  if (groqKey) {
-    try {
-      return {
-        text: await callOpenAICompatible({
-          url: "https://api.groq.com/openai/v1/chat/completions",
-          key: groqKey,
-          model: GROQ_MODEL,
-          messages,
-        }),
-        provider: `groq/${GROQ_MODEL}`,
-      };
-    } catch (e) {
-      attempts.push(`groq ${e.message}`);
-    }
-  }
-
-  const err = new Error(`All providers failed -> ${attempts.join(" | ")}`);
+  const err = new Error(`Cerebras failed -> ${attempts.join(" | ")}`);
   err.attempts = attempts;
   throw err;
 }
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   if (req.method === "OPTIONS") return res.status(200).end();
+
+  // Diagnostics: open /api/replies?diag=1 in a browser to see exactly which
+  // Cerebras models your key can use right now.
+  if (req.method === "GET") {
+    const key = (process.env.CEREBRAS_API_KEY || "").trim();
+    if (!key) return res.status(200).json({ cerebrasKey: false, models: [] });
+    try {
+      const models = await listCerebrasModels(key);
+      return res.status(200).json({
+        cerebrasKey: true,
+        models,
+        blocked: [...blocked.keys()],
+      });
+    } catch (e) {
+      return res.status(200).json({ cerebrasKey: true, error: e.message });
+    }
+  }
+
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
@@ -113,8 +193,9 @@ export default async function handler(req, res) {
     let check = checkDraft(text);
     let regenerated = false;
 
-    // Only retry when a hard rule broke, not for a few characters of length drift.
-    const hardFail = check.issues.some((i) => !i.startsWith("too short") && !i.startsWith("too long"));
+    const hardFail = check.issues.some(
+      (i) => !i.startsWith("too short") && !i.startsWith("too long"),
+    );
     if (hardFail) {
       regenerated = true;
       const retry = await generate([
