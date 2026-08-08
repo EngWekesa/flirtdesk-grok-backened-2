@@ -25,7 +25,7 @@ function rank(id) {
 let cerebrasCache = { models: null, at: 0 };
 const DISCOVERY_TTL_MS = 30 * 60 * 1000;
 const blocked = new Map(); 
-const BLOCK_TTL_MS = 15 * 1000;
+const BLOCK_TTL_MS = 15 * 60 * 1000;
 
 function isBlocked(model) {
   const at = blocked.get(model);
@@ -117,11 +117,6 @@ async function generate(messages) {
       if (isBlocked(model)) continue;
       try {
         return {
-          text: await callOpenAICompatible({
-            url: `${CEREBRAS_BASE}/chat/completions`,
-            key: cerebrasKey,
-            model,
-          }).then(fn => fn), // safety wrapper
           text: await callOpenAICompatible({ url: `${CEREBRAS_BASE}/chat/completions`, key: cerebrasKey, model, messages }),
           provider: `cerebras/${model}`,
         };
@@ -149,11 +144,10 @@ export default async function handler(req, res) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
     const clientMessage = String(body.clientMessage || "").trim();
-    const chatHistory = Array.isArray(body.history) ? body.history : []; // Read chat logs
+    const chatHistory = Array.isArray(body.history) ? body.history : []; 
     
     const userPrompt = buildUserPrompt(clientMessage);
 
-    // Build payload containing the real conversation context
     const messages = [
       { role: "system", content: OPERATOR_SYSTEM_PROMPT },
       ...chatHistory, 
