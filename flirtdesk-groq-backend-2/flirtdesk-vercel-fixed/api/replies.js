@@ -23,12 +23,35 @@ export default async function handler(req, res) {
   const apiKey = process.env.CEREBRAS_API_KEY;
 
   if (!apiKey) {
-    return res
-      .status(500)
-      .json({ error: "CEREBRAS_API_KEY environment variable is missing on Vercel" });
+    return res.status(500).json({
+      error: "CEREBRAS_API_KEY environment variable is missing on Vercel"
+    });
   }
 
   try {
+    const cleanApiKey = apiKey.trim();
+
+    // Dynamically fetch currently available active models from Cerebras
+    let targetModel = "llama3.1-8b";
+    try {
+      const modelsResponse = await fetch("https://api.cerebras.ai/v1/models", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${cleanApiKey}`
+        }
+      });
+
+      if (modelsResponse.ok) {
+        const modelsData = await modelsResponse.json();
+        if (modelsData.data && modelsData.data.length > 0) {
+          // Use the first active model available on your account
+          targetModel = modelsData.data[0].id;
+        }
+      }
+    } catch (e) {
+      console.warn("Could not dynamically fetch models, using default:", e.message);
+    }
+
     const { messages, tone, goal, customizedPrompt } = req.body || {};
 
     let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
@@ -38,15 +61,15 @@ export default async function handler(req, res) {
 
     promptText += `\nConversation History:\n${JSON.stringify(messages || [], null, 2)}`;
 
-    // Cerebras Chat Completions Call
+    // Call Cerebras Chat Completions
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey.trim()}`
+        Authorization: `Bearer ${cleanApiKey}`
       },
       body: JSON.stringify({
-        model: "llama3.1-8b",
+        model: targetModel,
         messages: [
           {
             role: "system",
