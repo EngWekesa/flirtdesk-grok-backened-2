@@ -77,51 +77,23 @@ async function listCerebrasModels(key) {
   return models;
 }
 
-function normaliseWho(who) {
-  const w = String(who || "").toLowerCase();
-  return w === "me" || w === "self" || w === "operator" ? "me" : "him";
-}
-
-function buildUserPrompt({ turns, conversation }) {
-  let text = "";
-  let lastHim = "";
-
-  if (Array.isArray(turns) && turns.length) {
-    const norm = turns.map((t) => ({
-      who: normaliseWho(t.who),
-      text: String(t.text || "").trim(),
-    }));
-    text = norm.map((t) => `${t.who === "me" ? "Me" : "Him"}: ${t.text}`).join("\n");
-    for (let i = norm.length - 1; i >= 0; i--) {
-      if (norm[i].who === "him" && norm[i].text) {
-        lastHim = norm[i].text;
-        break;
-      }
-    }
-  } else {
-    text = String(conversation || "");
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (/^(him|them|he)\s*:/i.test(lines[i])) {
-        lastHim = lines[i].replace(/^[^:]*:\s*/, "");
-        break;
-      }
-    }
-    if (!lastHim && lines.length) lastHim = lines[lines.length - 1].replace(/^[^:]*:\s*/, "");
-  }
-
-  if (text.length > MAX_CHARS) text = text.slice(-MAX_CHARS);
-
+function buildUserPrompt(clientMessage) {
+  let message = String(clientMessage || "").trim();
+  if (!message) throw new Error("No client message was received");
+  if (message.length > MAX_CHARS) message = message.slice(-MAX_CHARS);
   return [
-    "Conversation so far (Him = the customer, Me = you, the female player):",
-    text,
+    "Write a natural reply to this exact client message:",
+    "--- CLIENT MESSAGE ---",
+    message,
+    "--- END CLIENT MESSAGE ---",
     "",
-    `THE MESSAGE YOU MUST REPLY TO (his most recent message): "${lastHim}"`,
-    "",
-    "Reply directly and specifically to that last message. Stay on its exact topic,",
-    "answer anything he asked in it, and reference a concrete detail from it.",
-    "Do not start a new subject and do not reply to older messages.",
-    "Write only the next message from me (75-150 characters, exactly one question).",
+    "Do not invent a different topic, event, detail, or question.",
+    "Answer what this message says or asks, then continue that same subject.",
+    "Use details only from this message. If it is vague, respond naturally without making up facts.",
+    "- 75-150 characters.",
+    "- End with exactly one specific, interesting question.",
+    "- Make the question directly related to the client message.",
+    "- Output only the message text. No quotes, no labels.",
   ].join("\n");
 }
 
@@ -129,7 +101,7 @@ async function callOpenAICompatible({ url, key, model, messages }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, messages, temperature: 0.5, max_completion_tokens: 120 }),
+    body: JSON.stringify({ model, messages, temperature: 0.2, max_completion_tokens: 120 }),
   });
   const raw = await res.text();
   let data = {};
@@ -217,7 +189,8 @@ export default async function handler(req, res) {
   try {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
-    const userPrompt = buildUserPrompt(body);
+    const clientMessage = String(body.clientMessage || "").trim();
+    const userPrompt = buildUserPrompt(clientMessage);
 
     const messages = [
       { role: "system", content: OPERATOR_SYSTEM_PROMPT },
@@ -238,7 +211,7 @@ export default async function handler(req, res) {
         { role: "assistant", content: text },
         {
           role: "user",
-          content: `That draft broke these rules: ${check.issues.join("; ")}. Rewrite it keeping EXACTLY the same topic and the same reply to his last message - only reword the flagged parts. Do not change the subject. Output only the message.`,
+          content: `That draft broke these rules: ${check.issues.join("; ")}. Rewrite it while replying only to the exact client message above. Do not introduce a new topic or new facts. Output only the message.`,
         },
       ]);
       text = retry.text;
@@ -253,6 +226,7 @@ export default async function handler(req, res) {
       characters: text.length,
       regenerated,
       provider,
+      answering: clientMessage,
     });
   } catch (error) {
     console.error("FlirtDesk error:", error);
