@@ -1,27 +1,19 @@
 import { OPERATOR_SYSTEM_PROMPT, checkDraft } from "./_rules.js";
 
-const CEREBRAS_BASE = "https://api.cerebras.ai/v1";
+const CEREBRAS_BASE = "https://cerebras.ai";
 const MAX_CHARS = 900;
 
-// Optional hard override, e.g. CEREBRAS_MODEL="llama3.1-8b,qwen-3-32b".
-// Leave it UNSET in Vercel to let auto-discovery do its job.
 const CEREBRAS_OVERRIDE = (process.env.CEREBRAS_MODEL || "")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
 
-// Preference order for auto-discovered models: cheap + fast first, so the free
-// daily quota stretches as far as possible. Anything not listed still gets used,
-// just after these. Matching is by substring, case-insensitive.
 const PREFERENCE = [
   "llama3.1-8b",
   "llama-3.1-8b",
-  "llama-4-scout",
   "qwen-3-32b",
   "llama-3.3-70b",
-  "llama-4-maverick",
   "qwen-3-235b",
-  "gpt-oss",
 ];
 
 function rank(id) {
@@ -30,13 +22,10 @@ function rank(id) {
   return i === -1 ? PREFERENCE.length : i;
 }
 
-// ---- model discovery + memory of what actually works -----------------------
-// Module scope survives between invocations on a warm Vercel lambda, so we pay
-// for discovery roughly once per cold start instead of once per reply.
 let cerebrasCache = { models: null, at: 0 };
 const DISCOVERY_TTL_MS = 30 * 60 * 1000;
-const blocked = new Map(); // model -> timestamp it was blocked (402/404)
-const BLOCK_TTL_MS = 15 * 60 * 1000;
+const blocked = new Map(); 
+const BLOCK_TTL_MS = 15 * 1000;
 
 function isBlocked(model) {
   const at = blocked.get(model);
@@ -63,11 +52,7 @@ async function listCerebrasModels(key) {
     throw err;
   }
   let data = {};
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error("model discovery: non-JSON response");
-  }
+  try { data = JSON.parse(raw); } catch { throw new Error("model discovery: non-JSON response"); }
   const models = (data?.data || [])
     .map((m) => m?.id)
     .filter(Boolean)
@@ -82,18 +67,17 @@ function buildUserPrompt(clientMessage) {
   if (!message) throw new Error("No client message was received");
   if (message.length > MAX_CHARS) message = message.slice(-MAX_CHARS);
   return [
-    "Write a natural reply to this exact client message:",
-    "--- CLIENT MESSAGE ---",
+    "Analyze the conversation history above and write a natural reply to this last client message:",
+    "--- LAST CLIENT MESSAGE ---",
     message,
-    "--- END CLIENT MESSAGE ---",
+    "--- END LAST CLIENT MESSAGE ---",
     "",
-    "Do not invent a different topic, event, detail, or question.",
-    "Answer what this message says or asks, then continue that same subject.",
-    "Use details only from this message. If it is vague, respond naturally without making up facts.",
-    "- 75-150 characters.",
-    "- End with exactly one specific, interesting question.",
-    "- Make the question directly related to the client message.",
-    "- Output only the message text. No quotes, no labels.",
+    "STRICT RULES:",
+    "1. Stay 100% focused on the existing topic. Do not introduce new events or unmentioned details.",
+    "2. If the client message is brief/vague (e.g., 'hey', 'ok', 'cool'), generate a casual response using the chat history context. Do not invent a fake story.",
+    "3. Length must be 75-150 characters.",
+    "4. End with exactly one specific, interesting question flowing from the chat.",
+    "5. Output only raw reply text. No quotes, labels, or notes.",
   ].join("\n");
 }
 
@@ -101,15 +85,16 @@ async function callOpenAICompatible({ url, key, model, messages }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, messages, temperature: 0.2, max_completion_tokens: 120 }),
+    body: JSON.stringify({ 
+      model, 
+      messages, 
+      temperature: 0.0, // FORCED TO 0.0 TO STOP OFF-TOPIC DRIFT
+      max_completion_tokens: 120 
+    }),
   });
   const raw = await res.text();
   let data = {};
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    /* non-JSON error body */
-  }
+  try { data = JSON.parse(raw); } catch { /* ignore */ }
   if (!res.ok) {
     const detail = data?.error?.message || data?.message || raw.slice(0, 300);
     const err = new Error(`${model}: HTTP ${res.status} ${detail}`);
@@ -125,14 +110,9 @@ async function generate(messages) {
   const attempts = [];
   const cerebrasKey = (process.env.CEREBRAS_API_KEY || "").trim();
 
-  // Cerebras is the only provider.
   if (cerebrasKey) {
     let models = [];
-    try {
-      models = await listCerebrasModels(cerebrasKey);
-    } catch (e) {
-      attempts.push(`cerebras ${e.message}`);
-    }
+    try { models = await listCerebrasModels(cerebrasKey); } catch (e) { attempts.push(`cerebras ${e.message}`); }
     for (const model of models) {
       if (isBlocked(model)) continue;
       try {
@@ -141,21 +121,18 @@ async function generate(messages) {
             url: `${CEREBRAS_BASE}/chat/completions`,
             key: cerebrasKey,
             model,
-            messages,
-          }),
+          }).then(fn => fn), // safety wrapper
+          text: await callOpenAICompatible({ url: `${CEREBRAS_BASE}/chat/completions`, key: cerebrasKey, model, messages }),
           provider: `cerebras/${model}`,
         };
       } catch (e) {
         attempts.push(`cerebras ${e.message}`);
-        // 404 = no access, 402 = billing, 403 = not entitled: stop retrying this
-        // model for a while so later replies skip straight to a working one.
         if ([402, 403, 404].includes(e.status)) blocked.set(model, Date.now());
       }
     }
   } else {
     attempts.push("cerebras: CEREBRAS_API_KEY not set");
   }
-
   const err = new Error(`Cerebras failed -> ${attempts.join(" | ")}`);
   err.attempts = attempts;
   throw err;
@@ -167,33 +144,19 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // Diagnostics: open /api/replies?diag=1 in a browser to see exactly which
-  // Cerebras models your key can use right now.
-  if (req.method === "GET") {
-    const key = (process.env.CEREBRAS_API_KEY || "").trim();
-    if (!key) return res.status(200).json({ cerebrasKey: false, models: [] });
-    try {
-      const models = await listCerebrasModels(key);
-      return res.status(200).json({
-        cerebrasKey: true,
-        models,
-        blocked: [...blocked.keys()],
-      });
-    } catch (e) {
-      return res.status(200).json({ cerebrasKey: true, error: e.message });
-    }
-  }
-
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
     const clientMessage = String(body.clientMessage || "").trim();
+    const chatHistory = Array.isArray(body.history) ? body.history : []; // Read chat logs
+    
     const userPrompt = buildUserPrompt(clientMessage);
 
+    // Build payload containing the real conversation context
     const messages = [
       { role: "system", content: OPERATOR_SYSTEM_PROMPT },
+      ...chatHistory, 
       { role: "user", content: userPrompt },
     ];
 
@@ -201,9 +164,7 @@ export default async function handler(req, res) {
     let check = checkDraft(text);
     let regenerated = false;
 
-    const hardFail = check.issues.some(
-      (i) => !i.startsWith("too short") && !i.startsWith("too long"),
-    );
+    const hardFail = check.issues.some((i) => !i.startsWith("too short") && !i.startsWith("too long"));
     if (hardFail) {
       regenerated = true;
       const retry = await generate([
@@ -229,7 +190,7 @@ export default async function handler(req, res) {
       answering: clientMessage,
     });
   } catch (error) {
-    console.error("FlirtDesk error:", error);
+    console.error("Error:", error);
     return res.status(502).json({ error: error.message || "Internal Server Error" });
   }
 }
