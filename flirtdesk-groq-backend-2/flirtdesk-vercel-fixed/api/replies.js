@@ -1,8 +1,6 @@
-import { SYSTEM_PROMPT } from "./_rules.js";
-
-export default async function handler(req, res) {
-  // CORS setup
-  res.setHeader("Access-Control-Allow-Credentials", true);
+module.exports = async function handler(req, res) {
+  // CORS Headers
+  res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
     "Access-Control-Allow-Methods",
@@ -13,6 +11,7 @@ export default async function handler(req, res) {
     "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
   );
 
+  // Handle preflight CORS request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -24,13 +23,17 @@ export default async function handler(req, res) {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    return res.status(500).json({ error: "GEMINI_API_KEY environment variable is missing" });
+    return res
+      .status(500)
+      .json({ error: "GEMINI_API_KEY environment variable is missing on Vercel" });
   }
 
   try {
-    const { messages, tone, goal, customizedPrompt } = req.body;
+    const { messages, tone, goal, customizedPrompt } = req.body || {};
 
-    // Build the user prompt context
+    let systemInstructionText = "You are a helpful flirting and messaging assistant.";
+    
+    // Build user prompt context
     let promptText = `Generate appropriate reply suggestions for the following conversation.\n`;
     if (tone) promptText += `Tone: ${tone}\n`;
     if (goal) promptText += `Goal: ${goal}\n`;
@@ -48,7 +51,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           system_instruction: {
-            parts: [{ text: SYSTEM_PROMPT || "You are a helpful assistant." }]
+            parts: [{ text: systemInstructionText }]
           },
           contents: [
             {
@@ -69,11 +72,11 @@ export default async function handler(req, res) {
       });
     }
 
-    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
 
     return res.status(200).json({ reply: replyText });
   } catch (error) {
     console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal Server Error" });
+    return res.status(500).json({ error: error.message || "Internal Server Error" });
   }
-}
+};
